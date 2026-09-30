@@ -193,8 +193,10 @@ parse_file() {
 
         {
             line = $0
-            if (FNR == 1 && substr(line, 1, 3) == bom) {
-                line = substr(line, 4)
+            # Matched as a regex so it works whether awk counts bytes or
+            # characters (the awk of recent macOS versions is UTF-8 aware).
+            if (FNR == 1) {
+                sub("^" bom, "", line)
             }
             sub(/\r$/, "", line)
             raw = line
