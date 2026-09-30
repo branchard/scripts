@@ -4,10 +4,12 @@ on:
   push:
     paths:
       - check-env.sh
+      - tests/check-env.bats
       - .github/workflows/check-env.yaml
   pull_request:
     paths:
       - check-env.sh
+      - tests/check-env.bats
       - .github/workflows/check-env.yaml
   workflow_dispatch:
 
@@ -37,96 +39,25 @@ jobs:
             bash: /bin/bash
     steps:
       - uses: actions/checkout@v5
+
       - name: Show versions
         run: |
           "${{ matrix.bash }}" --version | head -n 1
-          awk --version 2>/dev/null | head -n 1 || awk -W version 2>/dev/null | head -n 1 || true
+          awk --version 2>/dev/null | head -n 1 || awk -W version 2>&1 | head -n 1 || true
+
+      - name: Setup Bats
+        uses: bats-core/bats-action@4.0.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          # The tests use no helper library.
+          support-install: false
+          assert-install: false
+          detik-install: false
+          file-install: false
+
       - name: Run tests
+        shell: bash
         env:
           BASH_BIN: ${{ matrix.bash }}
-        run: |
-          set +e
-          set -uo pipefail
-
-          SCRIPT="$PWD/check-env.sh"
-          BASH_BIN="${BASH_BIN:-bash}"
-          cd "$(mktemp -d)" || exit 1
-          failures=0
-
-          # Usage: run_test <name> <expected-exit> <expected-output-pattern|""> [args...]
-          run_test() {
-              local name="$1" expected_code="$2" pattern="$3" output code
-              shift 3
-              output="$("$BASH_BIN" "$SCRIPT" --no-color "$@" 2>&1)"
-              code=$?
-              if [[ "$code" -ne "$expected_code" ]]; then
-                  echo "FAIL: $name (exit $code, expected $expected_code)"; printf '    %s\n' "$output"
-                  failures=$((failures + 1)); return
-              fi
-              if [[ -n "$pattern" ]] && ! grep -Eq -- "$pattern" <<<"$output"; then
-                  echo "FAIL: $name (output does not match /$pattern/)"; printf '    %s\n' "$output"
-                  failures=$((failures + 1)); return
-              fi
-              echo "ok: $name"
-          }
-
-          printf '# Reference\nAPP_ENV=\nexport DB_URL=postgres://localhost\nSECRET=\n' > ref.env
-          printf 'APP_ENV=prod\nexport DB_URL="postgres://db"\nSECRET='"'"'s3cr#t'"'"' # comment\n' > valid.env
-
-          run_test "valid file" 0 "Summary: 1/1 file\(s\) OK" ref.env valid.env
-          run_test "help" 0 "^Usage:" --help
-          run_test "help after files" 0 "^Usage:" ref.env valid.env -h
-          run_test "missing arguments" 2 "expected a reference file" ref.env
-          run_test "unknown option" 2 "unknown option: --nope" --nope ref.env valid.env
-          run_test "invalid --allow-empty" 2 "invalid variable name" --allow-empty=1BAD ref.env valid.env
-          run_test "missing reference" 2 "missing.env: file not found" missing.env valid.env
-          run_test "missing target" 1 "missing.env: file not found" ref.env missing.env
-          run_test "quiet" 0 "^$" --quiet ref.env valid.env
-
-          printf 'A=1\nA=2\n' > dup-ref.env
-          run_test "invalid reference" 2 "dup-ref.env:2: duplicate variable A" dup-ref.env valid.env
-
-          printf 'APP_ENV=\nDB_URL= # to fill\nSECRET="  "\n' > empty.env
-          run_test "empty value" 1 "empty.env:1: empty value for APP_ENV" ref.env empty.env
-          run_test "comment-only value" 1 "empty.env:2: empty value for DB_URL" ref.env empty.env
-          run_test "whitespace-only value" 1 "empty.env:3: empty value for SECRET" ref.env empty.env
-          run_test "all errors reported" 1 "FAIL empty.env \(3 error" ref.env empty.env
-          run_test "--allow-empty" 0 "" --allow-empty ref.env empty.env
-          run_test "--allow-empty=LIST" 1 "FAIL empty.env \(1 error" --allow-empty=APP_ENV,DB_URL ref.env empty.env
-
-          printf 'APP_ENV=prod\nDB_URL=x\nDB_URL=y\nSECRET="abc\nBAD LINE\nSECRET2="a"b\n' > invalid.env
-          run_test "duplicate" 1 "invalid.env:3: duplicate variable DB_URL \(first defined on line 2\)" ref.env invalid.env
-          run_test "unterminated quote" 1 "invalid.env:4: unterminated quote in value of SECRET" ref.env invalid.env
-          run_test "invalid line" 1 "invalid.env:5: invalid line: BAD LINE" ref.env invalid.env
-          run_test "characters after quote" 1 "invalid.env:6: unexpected characters after closing quote" ref.env invalid.env
-
-          printf 'APP_ENV=prod\nDB_URL=x\nEXTRA=1\n' > diff.env
-          run_test "missing variable" 1 "diff.env: missing variable SECRET \(defined in ref.env:4\)" ref.env diff.env
-          run_test "extra variable" 1 "diff.env:3: unexpected variable EXTRA" ref.env diff.env
-          printf 'APP_ENV=prod\nDB_URL=x\nSECRET=x\nEXTRA=1\n' > extra.env
-          run_test "--allow-extra" 0 "" --allow-extra ref.env extra.env
-
-          printf 'DB_URL=x\nAPP_ENV=prod\nSECRET=x\n' > order.env
-          run_test "order" 1 "order.env:1: variable out of order: expected APP_ENV, found DB_URL" ref.env order.env
-          run_test "--no-order" 0 "" --no-order ref.env order.env
-
-          printf '\357\273\277APP_ENV=prod\r\nDB_URL=x\r\nSECRET=\r\n' > bom-crlf.env
-          run_test "BOM and CRLF" 1 "bom-crlf.env:3: empty value for SECRET" ref.env bom-crlf.env
-
-          printf 'A=1\n' > unreadable.env && chmod 000 unreadable.env
-          if [[ ! -r unreadable.env ]]; then
-              run_test "unreadable file" 1 "unreadable.env: file is not readable" ref.env unreadable.env
-          fi
-
-          run_test "multiple files" 1 "Summary: 1/2 file\(s\) OK" ref.env valid.env diff.env
-          cp valid.env ./-dash.env
-          run_test "end of options" 0 "OK -dash.env" ref.env -- -dash.env
-
-          printf '\n# empty\n' > none.env
-          run_test "empty reference" 1 "unexpected variable APP_ENV" none.env valid.env
-
-          if [[ "$failures" -gt 0 ]]; then
-              echo "$failures test(s) failed"
-              exit 1
-          fi
-          echo "All tests passed"
+          TERM: xterm
+        run: bats -p --print-output-on-failure tests/check-env.bats
