@@ -66,7 +66,8 @@ assert_output_matches() {
 }
 
 @test "-- ends the options" {
-    cp valid.env -- -dash.env
+    # "./" prefix: the cp of BSD (macOS) does not accept "--" here.
+    cp valid.env ./-dash.env
 
     check_env ref.env -- -dash.env
     assert_status 0
